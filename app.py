@@ -381,8 +381,38 @@ if load_history:
         FROM analyses ORDER BY id DESC
     """).fetchall()
     conn.close()
+
     if not rows:
         st.info("No history yet.")
     else:
-        df = pd.DataFrame(rows, columns=["id", "text", "final_sentiment", "model_confidence", "emotion", "emoji", "created_at"])
-        st.dataframe(df)
+        df = pd.DataFrame(rows, columns=["ID", "Text", "Final Sentiment", "Model Confidence", "Emotion", "Emoji", "Created At"])
+        
+        # Apply styling
+        def color_sentiment(val):
+            colors = {
+                "positive": "#d4f4dd",   # light green
+                "negative": "#f8d7da",   # light red
+                "neutral": "#f0f0f0",    # light gray
+                "sarcasm": "#e0d4f4"     # light purple
+            }
+            return f'background-color: {colors.get(val.lower(), "#ffffff")}'
+        
+        def confidence_gradient(val):
+            # Green to red gradient
+            from matplotlib import colors as mcolors
+            import matplotlib
+            cmap = matplotlib.cm.get_cmap('RdYlGn')
+            norm_val = min(max(val, 0), 1)
+            rgba = cmap(norm_val)
+            hex_color = mcolors.to_hex(rgba)
+            return f'background-color: {hex_color}; color:#000'
+
+        styled_df = df.style \
+            .applymap(color_sentiment, subset=['Final Sentiment']) \
+            .applymap(confidence_gradient, subset=['Model Confidence']) \
+            .set_properties(subset=['Emoji'], **{'font-size': '18px'}) \
+            .set_properties(subset=['Emotion'], **{'font-weight': '600'}) \
+            .set_properties(subset=['Text'], **{'max-width': '350px', 'text-overflow': 'ellipsis', 'white-space': 'nowrap', 'overflow': 'hidden'})
+
+        st.subheader("📊 Analysis History")
+        st.dataframe(styled_df, height=400)
