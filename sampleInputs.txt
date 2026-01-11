@@ -1,0 +1,70 @@
+ Positive : 
+
+ I love this application. The interface is intuitive and the performance is excellent.
+ electric vehicles innovation -> news
+ climate change -> news
+ iphone update -> youtube
+
+
+
+“I absolutely loved this experience. Everything was perfect and the staff was amazing.”
+
+“Today has been one of the best days of my life!”
+
+“This product exceeded my expectations. I would definitely recommend it!”
+
+ Negative : 
+
+ The system is unreliable. It crashes frequently and the response time is very slow.
+
+“I am extremely disappointed. Nothing worked as promised.”
+
+“This was the worst service I have ever experienced.”
+
+“I regret buying this. It’s a complete waste of money.”
+
+ Neutral : 
+
+“The meeting is scheduled for 2 PM tomorrow.”
+
+“I went to the store and bought some groceries.”
+
+“The weather is average today.”
+
+ Mixed / Confused :
+
+“The place was beautiful, but the service ruined the experience.”
+
+“I liked the idea, but the execution was disappointing.”
+
+“The product works, but it could be better.”
+
+ Sarcasm :
+
+“I just love being stuck in traffic... not”
+
+"Amazing job. Exactly what I needed today, a broken laptop.”
+
+"As if... because everything always goes perfectly for me.”
+
+ Anger / Disgust :
+
+“I am so angry with the experience we've had.”
+
+“The hotel room was disgusting and smelled horrible.”
+
+“The staff didn’t care at all. Completely unacceptable.”
+
+ Sadness :
+
+“I feel really lonely and exhausted lately.”
+
+“It hurts to think about what happened.”
+
+“I just feel empty inside.”
+
+ Fear / Anxiety :
+
+“I’m really scared about what’s going to happen tomorrow.”
+
+“I feel like something terrible is about to happen.”

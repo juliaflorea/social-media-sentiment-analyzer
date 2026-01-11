@@ -10,30 +10,54 @@ import plotly.express as px
 import plotly.graph_objects as go
 from wordcloud import WordCloud
 import matplotlib.pyplot as plt
+import requests
 import nltk
-nltk.download('punkt')
+from nltk.corpus import stopwords
+from nltk.stem import WordNetLemmatizer
+
+nltk.download("punkt", quiet=True)
+nltk.download("stopwords", quiet=True)
+nltk.download("wordnet", quiet=True)
+
+
 
 
 # ================================
 # MODELS
 # ================================
 @st.cache_resource
+# function that will create and return the sentiment analysis model from HuggingFace
 def load_sentiment_model():
     return pipeline(
         "sentiment-analysis",
-        model="distilbert-base-uncased-finetuned-sst-2-english"
+#  Hugging Face (DistilBERT) pretrained model which returns positive, negative or neuitral label + Vader 
+# which retruns sentiment polarity score
+        model="distilbert-base-uncased-finetuned-sst-2-english" 
+        
     )
 
 @st.cache_resource
+# function to load the emotion detection model
 def load_emotion_model():
     return pipeline(
         "text-classification",
-        model="SamLowe/roberta-base-go_emotions",
-        return_all_scores=False
+        model="SamLowe/roberta-base-go_emotions", # RoBERTa trained on Google’s GoEmotions dataset
+        return_all_scores=False # return only the top emotion
     )
 
 sentiment_model = load_sentiment_model()
 emotion_model = load_emotion_model()
+
+# ================================
+# EXTERNAL APIs CONFIG
+# ================================
+
+# NewsAPI
+NEWS_API_KEY = "c90b27b1743b445eb23cc03e005abdaa"
+
+# SerpAPI (YouTube)
+YOUTUBE_API_KEY = "AIzaSyCp0yhPzgOK5VC0pdm1Obd5EnHZq-LCgS0"
+
 
 # ================================
 # DATABASE
@@ -41,6 +65,7 @@ emotion_model = load_emotion_model()
 DB_PATH = "data/app.db"
 os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
 
+# function to initialize db structure 
 def init_db():
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
@@ -61,6 +86,7 @@ def init_db():
 
 init_db()
 
+# function to save the results in the db
 def save_result(text, sentiment, confidence, emotion, emoji, model_used):
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
@@ -73,8 +99,8 @@ def save_result(text, sentiment, confidence, emotion, emoji, model_used):
 
 # ================================
 # EMOJI MAP
-# ================================
-EMOJI_MAP = {
+# ================================ 
+EMOJI_MAP = {   # dictionaryto map each emotion to an emoji
     "joy": "😊",
     "anger": "😡",
     "sadness": "😢",
@@ -96,58 +122,109 @@ EMOJI_MAP = {
 # ================================
 # STRICT SARCASM DETECTION
 # ================================
+
+# function to decide if a sentence is sarcastic or not
 def detect_sarcasm(text: str, vader_score: float, emotion_label: str, hf_sentiment: str) -> bool:
+    """
+    Detect sarcasm using multi-signal fusion instead of single keywords.
+    Returns True if sarcasm is likely, False otherwise.
+    """
+
     if not text:
         return False
 
-    text_low = text.lower()
-    sarcasm_keywords = [
-        "yeah right", "sure", "totally", "as if", "great, just what i needed",
-        "just what i needed", "oh great", "amazing job", "nice going", "i love that",
-        "love that for me", "thank you so much, not", "thanks a lot, not"
-    ]
-    if any(kw in text_low for kw in sarcasm_keywords):
-        return True
+    sentences = nltk.sent_tokenize(text)
 
+    conflict_count = 0
     negative_emotions = {"disappointment", "anger", "annoyance", "sadness", "disgust", "fear"}
-    positive_emotions = {"joy", "admiration", "approval", "optimism", "love", "caring"}
+    positive_emotions = {"joy", "love", "admiration", "approval", "optimism", "caring"}
 
-    # HF positive but VADER negative & emotion negative → sarcasm
-    if hf_sentiment == "positive" and vader_score < -0.25 and emotion_label in negative_emotions:
-        return True
+    vader = SentimentIntensityAnalyzer()
 
-    # HF negative but VADER positive & emotion positive → sarcasm
-    if hf_sentiment == "negative" and vader_score > 0.25 and emotion_label in positive_emotions:
-        return True
+    for s in sentences:
+        vader_s = vader.polarity_scores(s)["compound"]
+        vader_label = "positive" if vader_s > 0.05 else ("negative" if vader_s < -0.05 else "neutral")
 
-    return False
+        hf_raw = sentiment_model(s, truncation=True, max_length=512)[0]
+        hf_label = hf_raw["label"].lower()
+
+        emotion_raw = emotion_model(s, truncation=True, max_length=512)[0]
+        emotion = emotion_raw["label"].lower()
+
+        # Conflict patterns
+        if hf_label == "positive" and vader_label == "negative" and emotion in negative_emotions:
+            conflict_count += 1
+        if hf_label == "negative" and vader_label == "positive" and emotion in positive_emotions:
+            conflict_count += 1
+
+    return conflict_count >= 2
+
+
 
 # ================================
 # SENTIMENT FUSION
 # ================================
-def fuse_sentiment(text: str, hf_label: str, vader_sentiment: str, emotion_label: str, vader_score: float) -> str:
-    hf_sent = "positive" if hf_label.lower() == "positive" else "negative"
 
-    if detect_sarcasm(text, vader_score, emotion_label, hf_sent):
-        return "sarcasm"
-
-    negative_emotions = {"anger", "annoyance", "sadness", "fear", "disappointment", "disgust"}
-    positive_emotions = {"joy", "love", "admiration", "approval", "optimism", "caring"}
-
-    if emotion_label in negative_emotions:
-        return "negative"
-    if emotion_label in positive_emotions:
-        return "positive"
-
-    if vader_score > 0.6:
-        return "positive"
-    if vader_score < -0.6:
-        return "negative"
-
-    if -0.05 < vader_score < 0.05:
+# function that combines Hugging Face sentiment, VADER sentiment score, Emotion detection, Sarcasm detection
+# returns either "positive", "negative", "neutral" or "sarcasm"
+def fuse_sentiment(text: str) -> str:
+    sentences = nltk.sent_tokenize(text)
+    if not sentences:
         return "neutral"
 
-    return hf_sent
+    vader = SentimentIntensityAnalyzer()
+    pos_count = neg_count = neu_count = 0
+    conflict_count = 0
+
+    for s in sentences:
+        # VADER
+        vs = vader.polarity_scores(s)["compound"]
+        vs_label = "positive" if vs > 0.05 else ("negative" if vs < -0.05 else "neutral")
+
+        # HF
+        hf_label = sentiment_model(s, truncation=True, max_length=512)[0]["label"].lower()
+
+        # Emotion
+        emotion_label = emotion_model(s, truncation=True, max_length=512)[0]["label"].lower()
+        positive_emotions = {"joy","love","admiration","approval","optimism","caring"}
+        negative_emotions = {"anger","annoyance","sadness","fear","disappointment","disgust"}
+
+        if emotion_label in positive_emotions:
+            em_sent = "positive"
+        elif emotion_label in negative_emotions:
+            em_sent = "negative"
+        else:
+            em_sent = "neutral"
+
+        # Count conflicts (sarcasm or mixed)
+        if (hf_label=="positive" and vs_label=="negative" and em_sent=="negative") or \
+           (hf_label=="negative" and vs_label=="positive" and em_sent=="positive"):
+            conflict_count += 1
+
+        # Voting: emotion > HF > VADER
+        if em_sent!="neutral":
+            fused = em_sent
+        elif hf_label!="neutral":
+            fused = hf_label
+        else:
+            fused = vs_label
+
+        if fused=="positive":
+            pos_count += 1
+        elif fused=="negative":
+            neg_count += 1
+        else:
+            neu_count += 1
+
+    # Aggregate
+    if conflict_count >= 1:
+        return "mixed"
+    if pos_count > neg_count:
+        return "positive"
+    if neg_count > pos_count:
+        return "negative"
+    return "neutral"
+
 
 # ================================
 # Clear text handler
@@ -158,15 +235,269 @@ def clear_text():
 # ================================
 # Helper: sentiment color badge (HTML)
 # ================================
+
+#function to map each sentiment to a color
 def sentiment_badge_html(label: str) -> str:
-    color_map = {
-        "positive": "#1a9850",
-        "negative": "#d73027",
-        "neutral": "#999999",
-        "sarcasm": "#6a51a3"
+    color_map = { 
+        "positive": "#1a9850",  # green
+        "negative": "#d73027",  # red
+        "neutral": "#999999",   # grey
+        "sarcasm": "#6a51a3"    # purple
     }
     color = color_map.get(label, "#333333")
     return f'<div style="display:inline-block;padding:8px 14px;border-radius:12px;background:{color};color:#ffffff;font-weight:600">{label.capitalize()}</div>'
+
+def fetch_news_articles(query):
+    url = "https://newsapi.org/v2/everything"
+    params = {"q": query, "language": "en", "pageSize": 5, "apiKey": NEWS_API_KEY}
+    response = requests.get(url, params=params).json()
+    articles = response.get("articles", [])
+    return [a["title"] + ". " + (a["description"] or "") for a in articles]
+
+def fetch_youtube_comments(query, max_videos=3, max_comments=10):
+    search_url = "https://www.googleapis.com/youtube/v3/search"
+    comments_url = "https://www.googleapis.com/youtube/v3/commentThreads"
+
+    comments = []
+
+    # 1️⃣ Search videos
+    search_params = {
+        "part": "snippet",
+        "q": query,
+        "type": "video",
+        "maxResults": max_videos,
+        "key": YOUTUBE_API_KEY
+    }
+
+    search_resp = requests.get(search_url, params=search_params).json()
+    video_ids = [
+        item["id"]["videoId"]
+        for item in search_resp.get("items", [])
+        if "videoId" in item["id"]
+    ]
+
+    if not video_ids:
+        return []
+
+    # 2️⃣ Fetch comments
+    for vid in video_ids:
+        comment_params = {
+            "part": "snippet",
+            "videoId": vid,
+            "maxResults": max_comments,
+            "textFormat": "plainText",
+            "key": YOUTUBE_API_KEY
+        }
+
+        comment_resp = requests.get(comments_url, params=comment_params).json()
+
+        for item in comment_resp.get("items", []):
+            text = item["snippet"]["topLevelComment"]["snippet"]["textDisplay"]
+            comments.append(text)
+
+    return comments
+
+
+def sentiment_to_numeric(label):
+    mapping = {"positive": 1, "neutral": 0, "negative": -1, "sarcasm": -0.5}
+    return mapping.get(label.lower(), 0)
+
+def plot_sentiment_trend(texts):
+    trend_data = []
+
+    for i, text in enumerate(texts):
+        cleaned_text = re.sub(r'\s+', ' ', text).strip()
+        if not cleaned_text:
+            continue
+
+        # VADER
+        vader_score = SentimentIntensityAnalyzer().polarity_scores(cleaned_text)["compound"]
+        vader_sent = "positive" if vader_score > 0.05 else ("negative" if vader_score < -0.05 else "neutral")
+
+        # HF
+        hf_raw = sentiment_model(cleaned_text, truncation=True, max_length=512)[0]
+        hf_label = hf_raw["label"].lower()
+
+        # Emotion
+        emotion_raw = emotion_model(cleaned_text, truncation=True, max_length=512)[0]
+        emotion_label = emotion_raw["label"].lower()
+
+        # Fusion
+        fused = fuse_sentiment(cleaned_text)
+
+
+        trend_data.append({
+            "Post": i+1,
+            "HF": sentiment_to_numeric(hf_label),
+            "VADER": sentiment_to_numeric(vader_sent),
+            "Fused": sentiment_to_numeric(fused)
+        })
+
+    df_trend = pd.DataFrame(trend_data)
+    if df_trend.empty:
+        st.info("No posts to analyze for trend.")
+        return
+
+    fig = px.line(df_trend, x="Post", y=["HF", "VADER", "Fused"], markers=True,
+                  title="Sentiment Trend Across Multiple Posts")
+    fig.update_layout(yaxis_title="Sentiment (numeric)",
+                      yaxis=dict(tickvals=[-1, -0.5, 0, 1], ticktext=["Negative","Sarcasm","Neutral","Positive"]))
+    st.plotly_chart(fig, use_container_width=True)
+
+# ================================
+# KEYWORD-LEVEL SENTIMENT
+# ================================
+from collections import Counter
+import nltk
+nltk.download('punkt', quiet=True)
+
+def keyword_sentiment(text, top_n=10):
+    stop_words = set(stopwords.words("english"))
+    lemmatizer = WordNetLemmatizer()
+    vader = SentimentIntensityAnalyzer()
+
+    words = nltk.word_tokenize(text)
+    cleaned = [lemmatizer.lemmatize(w.lower()) for w in words if w.isalpha() and w.lower() not in stop_words]
+    top_words = [w for w,_ in Counter(cleaned).most_common(top_n)]
+    sentences = nltk.sent_tokenize(text)
+
+    rows = []
+    for kw in top_words:
+        kw_scores = []
+        for s in sentences:
+            if kw.lower() in s.lower():
+                kw_scores.append(vader.polarity_scores(s)["compound"])
+        if not kw_scores:
+            final_kw_sent = "neutral"
+        else:
+            avg = sum(kw_scores)/len(kw_scores)
+            if avg > 0.05:
+                final_kw_sent = "positive"
+            elif avg < -0.05:
+                final_kw_sent = "negative"
+            else:
+                final_kw_sent = "neutral"
+        rows.append({"Keyword": kw, "Sentiment": final_kw_sent})
+    return pd.DataFrame(rows)
+
+
+def plot_keyword_sentiment(df_keywords):
+    if df_keywords.empty:
+        return
+    color_map = {"positive":"#1a9850","negative":"#d73027","neutral":"#999999","mixed":"#f0ad4e"}
+    
+    fig = px.bar(
+        df_keywords,
+        x="Keyword",
+        y=[1]*len(df_keywords),  # Dummy numeric value to make Plotly happy
+        color="Sentiment",
+        color_discrete_map=color_map,
+        text="Sentiment",
+        title="Keyword-Level Sentiment Map"
+    )
+    fig.update_layout(
+        yaxis_title="Sentiment",
+        yaxis=dict(showticklabels=False)  # Hide the dummy y-axis
+    )
+    st.plotly_chart(fig, use_container_width=True)
+
+def extract_themes(text, top_n=5):
+    df_keywords = keyword_sentiment(text, top_n=top_n)
+    themes = {}
+    for _, row in df_keywords.iterrows():
+        themes[row["Keyword"]] = row["Sentiment"]  # <-- Fixed column name
+
+    # Display
+    st.subheader("🧩 Extracted Themes & Sentiments")
+    for k, v in themes.items():
+        st.markdown(f"**{k.capitalize()}** → {v.capitalize()}")
+
+
+
+def cross_platform_comparison(keyword):
+    """
+    Performs cross-platform sentiment analysis for a keyword across:
+    - Manual Input
+    - News articles
+    - YouTube comments
+    Uses cached multi-model sentiment analysis and maps to numeric for visualization.
+    """
+    sources = ["Manual Input", "News", "YouTube"]
+    results = []
+
+    # ---------------- Manual Input ----------------
+    results.append({
+        "source": "Manual Input",
+        "avg_sentiment": sentiment_to_numeric(analyze_text_cached(keyword))
+    })
+
+    # ---------------- News ----------------
+    news_texts = fetch_news_articles(keyword)
+    if news_texts:
+        results.append({
+            "source": "News",
+            "avg_sentiment": sum([sentiment_to_numeric(analyze_text_cached(t)) for t in news_texts]) / len(news_texts)
+        })
+    else:
+        results.append({"source": "News", "avg_sentiment": 0})
+
+    # ---------------- YouTube ----------------
+    yt_texts = fetch_youtube_comments(keyword)
+    if yt_texts:
+        results.append({
+            "source": "YouTube",
+            "avg_sentiment": sum([sentiment_to_numeric(analyze_text_cached(t)) for t in yt_texts]) / len(yt_texts)
+        })
+    else:
+        results.append({"source": "YouTube", "avg_sentiment": 0})
+
+    # ---------------- Display as Plotly bar ----------------
+    df = pd.DataFrame(results)
+    fig = px.bar(
+        df,
+        x="source",
+        y="avg_sentiment",
+        color="avg_sentiment",
+        color_continuous_scale=px.colors.diverging.RdYlGn,
+        range_color=[-1, 1],
+        title=f"🌐 Cross-Platform Average Sentiment for '{keyword}'"
+    )
+    fig.update_layout(
+        yaxis_title="Average Sentiment (-1 Negative → 1 Positive)"
+    )
+    st.plotly_chart(fig, use_container_width=True)
+
+@st.cache_data
+def analyze_text_cached(text):
+    """
+    Analyze text using HuggingFace sentiment, VADER, and emotion model.
+    Returns the fused sentiment.
+    """
+
+    # 1️⃣ VADER sentiment
+    vader = SentimentIntensityAnalyzer()
+    vader_score = vader.polarity_scores(text)["compound"]
+    vader_sent = "positive" if vader_score > 0.05 else ("negative" if vader_score < -0.05 else "neutral")
+
+    # 2️⃣ HuggingFace sentiment
+    hf_raw = sentiment_model(text, truncation=True, max_length=512)[0]
+    hf_label = hf_raw["label"].lower()
+    hf_score = float(hf_raw.get("score", 1.0))
+
+    # 3️⃣ Emotion detection
+    emotion_raw = emotion_model(text, truncation=True, max_length=512)[0]
+    emotion_label = emotion_raw["label"].lower()
+    emotion_score = float(emotion_raw.get("score", 1.0))
+
+    # 4️⃣ Fuse sentiment correctly using actual VADER label
+    fused = fuse_sentiment(text)
+
+
+    return fused
+
+
+
+
 # ================================
 # STREAMLIT UI
 # ================================
@@ -174,16 +505,31 @@ st.set_page_config(page_title="Sentiment & Emotion Analyzer", layout="centered")
 st.title("Sentiment & Emotion Analyzer")
 st.write("Enter text below and click **Analyze**. The dashboard shows model comparison and visualizations.")
 
+data_source = st.selectbox(
+    "Select data source",
+    ["Manual Input", "News", "YouTube"]
+
+)
+
 # session state init
 if "user_input" not in st.session_state:
     st.session_state["user_input"] = ""
 
-user_input = st.text_area(
-    "Enter your text here",
-    value=st.session_state["user_input"],
-    key="user_input",
-    height=140
-)
+if data_source == "Manual Input":
+    user_input = st.text_area(
+        "Enter your text here",
+        value=st.session_state["user_input"],
+        key="user_input",
+        height=140
+    )
+else:
+    user_input = st.text_input(
+        "Enter keyword for data retrieval (News/YouTube)",
+        value=st.session_state["user_input"],
+        key="user_input"
+    )
+
+
 
 col1, col2, col3 = st.columns([1,1,1])
 with col1:
@@ -193,17 +539,54 @@ with col2:
 with col3:
     load_history = st.button("Load Analysis History")
 
+
+
 # ================================
 # Main analysis
 # ================================
 if analyze_clicked:
-    input_text = (st.session_state["user_input"] or "").strip()
+    if data_source == "Manual Input":
+        input_text = (st.session_state["user_input"] or "").strip()
+
+    elif data_source == "News":
+        if not user_input.strip():
+            st.warning("Please enter a keyword to fetch news articles.")
+            st.stop()
+        texts = fetch_news_articles(user_input.strip())
+        input_text = " ".join(texts)
+
+        # ---------------- Add Trend Chart ----------------
+        plot_sentiment_trend(texts)
+
+    elif data_source == "YouTube":
+        if not user_input.strip():
+            st.warning("Please enter a keyword to fetch YouTube comments.")
+            st.stop()
+        texts = fetch_youtube_comments(user_input.strip())
+
+        if not texts:
+            st.warning("Could not fetch YouTube comments for this keyword. Analyzing video titles instead.")
+            input_text = user_input
+        else:
+            input_text = " ".join(texts)
+
+            # ---------------- Add Trend Chart ----------------
+            plot_sentiment_trend(texts)
+        
+    else:
+        st.warning("Unknown data source selected.")
+        st.stop()
+
     if not input_text:
         st.warning("Please enter some text to analyze.")
     else:
         cleaned_text = re.sub(r'\s+', ' ', input_text).strip()
 
-        # VADER
+          # ---------------- Cross-Platform Comparison ----------------
+        st.subheader("🌐 Cross-Platform Sentiment Comparison")
+        cross_platform_comparison(user_input.strip())
+
+        # VADER model for calculating sentiment score
         vader = SentimentIntensityAnalyzer()
         vader_score = vader.polarity_scores(cleaned_text)["compound"]
         if vader_score >= 0.05:
@@ -213,23 +596,30 @@ if analyze_clicked:
         else:
             vader_sentiment = "neutral"
 
-        # HF sentiment
-        hf_raw = sentiment_model(cleaned_text)[0]
+        # HF sentiment to return label and confidence score 
+        hf_raw = sentiment_model(
+    cleaned_text,
+    truncation=True,
+    max_length=512
+)[0]
+
         hf_label = hf_raw["label"].lower()
         hf_score = float(hf_raw["score"])
 
-        # Emotion
-        emotion_raw = emotion_model(cleaned_text)[0]
+        # Emotion model to detect emotion and asign emoji from emoji map
+        # HuggingFace pipelines accept a 'truncation' argument for long sequences
+        emotion_raw = emotion_model(cleaned_text, truncation=True, max_length=512)[0]
         emotion_label = emotion_raw["label"].lower()
         emotion_score = float(emotion_raw.get("score", 1.0))
         emoji = EMOJI_MAP.get(emotion_label, "🙂")
 
         # Fusion
-        final_sentiment = fuse_sentiment(cleaned_text, hf_label, vader_sentiment, emotion_label, vader_score)
+        final_sentiment = fuse_sentiment(cleaned_text)
+
 
         # ---------------- Dashboard / Metrics ----------------
         st.subheader("Multi-Model Comparison Dashboard")
-
+# dashboard to display HF sentiment label + confidence score, Vader polarity score + label, emotion + emoji
         m1, m2, m3 = st.columns(3)
         with m1:
             st.markdown("**HuggingFace (HF) Sentiment**")
@@ -246,7 +636,20 @@ if analyze_clicked:
         st.markdown("**Final fused sentiment**")
         st.markdown(sentiment_badge_html(final_sentiment), unsafe_allow_html=True)
 
+        st.markdown(f"**Data source:** {data_source}")
+
+        # ---------------- Keyword-level sentiment ----------------
+        st.subheader("🔑 Keyword-Level Sentiment")
+        df_keywords = keyword_sentiment(cleaned_text, top_n=10)
+        st.table(df_keywords)
+
+        plot_keyword_sentiment(df_keywords)
+
+        extract_themes(cleaned_text, top_n=8)
+
         # ---------------- User-friendly summary ----------------
+
+# displays a text based on final sentiment 
         summary_text = ""
         if final_sentiment == "positive":
             summary_text += "Overall, the text feels **positive / happy**. "
@@ -297,9 +700,9 @@ if analyze_clicked:
         st.markdown("**Input (with detected highlights)**")
         def highlight_text(text):
             low = text.lower()
-            positive_words = ["great", "amazing", "love", "happy", "excited", "fantastic", "improved"]
+            positive_words = ["great", "amazing", "love",  "like", "happy", "excited", "fantastic", "improved"]
             negative_words = ["awful", "disappointed", "hate", "angry", "frustrating", "crash", "freezing", "error"]
-            sarcasm_words = ["yeah right", "sure", "just what i needed", "great job"]
+            sarcasm_words = ["Yeah right", "sure", "just what i needed", "great job"]
 
             import html
             out = html.escape(text)
@@ -322,7 +725,7 @@ if analyze_clicked:
 
         st.info(f"HF label: {hf_label.capitalize()} ({hf_score:.2f})  •  VADER: {vader_sentiment} ({vader_score:.3f})  •  Emotion: {emotion_label}")
 
-        # ---------------- Word Cloud ----------------
+        # ---------------- Word Cloud  for mostv frequent words in the text----------------
         st.subheader("Word Cloud")
         try:
             wc = WordCloud(width=800, height=400, background_color="white").generate(cleaned_text)
@@ -334,6 +737,7 @@ if analyze_clicked:
             st.error(f"Word Cloud could not be generated: {e}")
 
         # ---------------- Sentiment Timeline ----------------
+        # splits text into sentences to show how sentiment changes across text
         st.subheader("Sentiment Timeline (Per Sentence)")
         sentences = nltk.sent_tokenize(cleaned_text)
         vader = SentimentIntensityAnalyzer()
@@ -362,9 +766,11 @@ if analyze_clicked:
         else:
             st.info("Enter more than one sentence to see a timeline visualization.")
 
+
 # ================================
 # HISTORY
 # ================================
+# loads previous analyses from db
 if load_history:
     conn = sqlite3.connect(DB_PATH)
     rows = conn.execute("""
@@ -382,7 +788,7 @@ if load_history:
             colors = {
                 "positive": "#d4f4dd",   # light green
                 "negative": "#f8d7da",   # light red
-                "neutral": "#f0f0f0",    # light gray
+                "neutral": "#f0f0f0",    # light grey
                 "sarcasm": "#e0d4f4"     # light purple
             }
             return f'background-color: {colors.get(val.lower(), "#ffffff")}'
